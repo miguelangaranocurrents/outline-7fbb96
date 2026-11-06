@@ -1,4 +1,8 @@
-import type { InferAttributes, InferCreationAttributes } from "sequelize";
+import type {
+  InferAttributes,
+  InferCreationAttributes,
+  Transaction,
+} from "sequelize";
 import { Op, type SaveOptions, type FindOptions } from "sequelize";
 import type { WhereOptions } from "sequelize";
 import {
@@ -224,11 +228,12 @@ class UserMembership extends IdModel<
   }
 
   @AfterCreate
-  static async invalidateCollectionIdsAfterCreate(model: UserMembership) {
+  static async invalidateCollectionIdsAfterCreate(
+    model: UserMembership,
+    options: { transaction?: Transaction }
+  ) {
     if (model.collectionId) {
-      await CacheHelper.clearData(
-        RedisPrefixHelper.getUserCollectionIdsKey(model.userId)
-      );
+      await UserMembership.invalidateCollectionIds(model, options.transaction);
     }
   }
 
@@ -315,12 +320,38 @@ class UserMembership extends IdModel<
   }
 
   @AfterDestroy
-  static async invalidateCollectionIdsAfterDestroy(model: UserMembership) {
+  static async invalidateCollectionIdsAfterDestroy(
+    model: UserMembership,
+    options: { transaction?: Transaction }
+  ) {
     if (model.collectionId) {
-      await CacheHelper.clearData(
+      await UserMembership.invalidateCollectionIds(model, options.transaction);
+    }
+  }
+
+  /**
+   * Clears the cached collection ids of the membership's user. Inside a
+   * transaction this waits for the commit, otherwise a read made before the
+   * commit would repopulate the cache with the stale list for the cache TTL.
+   *
+   * @param model the membership that was created or destroyed.
+   * @param transaction the transaction the change was made in, if any.
+   */
+  private static async invalidateCollectionIds(
+    model: UserMembership,
+    transaction?: Transaction
+  ) {
+    const invalidate = () =>
+      CacheHelper.clearData(
         RedisPrefixHelper.getUserCollectionIdsKey(model.userId)
       );
+
+    if (transaction) {
+      (transaction.parent || transaction).afterCommit(invalidate);
+      return;
     }
+
+    await invalidate();
   }
 
   @AfterDestroy
